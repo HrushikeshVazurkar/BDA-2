@@ -1,0 +1,559 @@
+---
+editor_options:
+  markdown:
+    wrap: 72
+output: pdf_document
+---
+
+**School of Mathematics, University of Edinburgh**
+**Bayesian Data Analysis - Assignment 2**
+**s2550941 - Hrushikesh Vazurkar**
+
+```{r}
+knitr::opts_chunk$set(echo = TRUE)
+rm(list = ls(all = TRUE))
+```
+
+# Data Preprocessing
+
+```{r Load dataset, remove NA rows and derive a new covariate average_bed_rooms}
+library(INLA)
+housing<-read.csv("housing.csv")
+housing=housing[complete.cases(housing), ] # Remove all rows with NA from housing dataset
+housing$average_bed_rooms=housing$total_bedrooms/housing$households # Creating average_bed_rooms covariate
+
+head(housing)
+```
+
+```{r Encoding categorical covariate ocean_proximity}
+housing$ocean_proximity_encoded <- as.integer(as.factor(housing$ocean_proximity))
+```
+
+```{r Create log transformed (derived) covariates for median_income and median_house_value}
+housing$log_median_income <- log(housing$median_income)
+housing$log_median_house_value <- log(housing$median_house_value)
+```
+
+```{r Scaling all non-categorical covariates}
+housing$longitude <- scale(housing$longitude)
+housing$latitude <- scale(housing$latitude)
+housing$housing_median_age <- scale(housing$housing_median_age)
+housing$log_median_income <- scale(housing$log_median_income)
+housing$average_bed_rooms <- scale(housing$average_bed_rooms)
+```
+
+```{r Adding interaction term (for Q3)}
+housing$interaction_term <- housing$housing_median_age*housing$log_median_income
+```
+
+```{r Remove all unnecessary columns from the housing dataset}
+housing <- subset(housing, select = c("longitude", "latitude", "housing_median_age", "log_median_income", "ocean_proximity_encoded", "average_bed_rooms", "interaction_term", "log_median_house_value"))
+```
+
+```{r Training and Test datasets from Housing dataset}
+#We split the original dataset into two parts, training and test
+housing.training<-housing[seq(from=1,to=nrow(housing),by=2), ]
+housing.test<-housing[seq(from=2,to=nrow(housing),by=2), ]
+```
+
+```{r Save the log-transformed values for log_median_house_value}
+log_median_house_value.training.true <- housing.training$log_median_house_value
+log_median_house_value.test.true <- housing.test$log_median_house_value
+```
+
+```{r Masking log_median_house_value for Q3 and creating masked housing dataset}
+housing.test$log_median_house_value <- NA
+housing.masked <- rbind(housing.training, housing.test)
+```
+
+# Q1)[10 marks] Fit a Bayesian Linear regression model in INLA (with Gaussian likelihood) using the housing.training dataset such that the response variable is the log(median_house_value), and the covariates in the model are as follows:
+
+**longitude, latitude, housing_median_age, log(median_income), ocean_proximity, average_bed_rooms.**
+
+**Use scaled versions of the non-categorical covariates in your model.**
+
+## Print out the model summary and interpret the posterior means of the regression coefficients.
+
+```{r Model 1 with DIC, NLSCPO and WAIC}
+housing.I.Q1 <- inla(log_median_house_value ~ longitude + latitude + housing_median_age + log_median_income + ocean_proximity_encoded + average_bed_rooms, data=housing.training, family="gaussian", control.compute = list(cpo = TRUE, dic = TRUE, waic = TRUE, config = TRUE))
+summary(housing.I.Q1)
+```
+***Posterior Means of Location covariates coefficients - Longitude and Latitude***
+
+```{r Model 1 - Longitude and Latitude summary mean values}
+cat("Longitude Mean: ", housing.I.Q1$summary.fixed["longitude", "mean"], "\n")
+cat("Latitude Mean: ", housing.I.Q1$summary.fixed["latitude", "mean"], "\n")
+```
+The coefficients of Longitude and Latitude mean are both negative. It signifies that as we moves a unit north and/or a unit east, the value of predictor variable log(median_house_value) decreases.
+
+```{r Model 1 - numeric covariates mean coefficient correlations with predictor median_house_value}
+cat("Housing Median Age Mean: ", housing.I.Q1$summary.fixed["housing_median_age", "mean"], "\n")
+cat("Log(Median Income) Mean: ", housing.I.Q1$summary.fixed["log_median_income", "mean"], "\n")
+cat("Average Bed Rooms Mean: ", housing.I.Q1$summary.fixed["average_bed_rooms", "mean"], "\n")
+```
+Based on the coefficient values of covariates like housing_median_age, log(median_income) and average_bed_rooms, it can be seen that the predictor log(median_house_value) or basically house prices are mainly dependent to the log(median_income) or income of the owners. Factors like house age or average bed rooms do not matter to that extent.
+ 
+**Compute the DIC, NLSCPO and WAIC scores.**
+
+```{r Model 1 - DIC score}
+cat("Model 1 - DIC Score: ", housing.I.Q1$dic$dic, "\n")
+```
+```{r Model 1 - NLSCPO score}
+cpo_list <- housing.I.Q1$cpo$cpo
+cat("Model 1 - NLSCPO Score: ", -sum(log(cpo_list[!is.na(cpo_list)])), "\n")
+```
+```{r Model 1 - WAIC score}
+cat("Model 1 - WAIC Score: ", housing.I.Q1$waic$waic, "\n")
+```
+**Check the sensitivity of your results to changing the priors.**
+
+```{r Model 1 - Custom priors and modelling}
+# custom priors for Model 1
+prec.prior <- list(prec=list(prior = "loggamma", param = c(0.1, 0.1)))
+prior.beta <- list(mean.intercept = 0, prec.intercept = 0.01, mean = 0, prec = 0.01)
+
+housing.I.Q1.custom_priors <- inla(log_median_house_value ~ longitude + latitude + housing_median_age + log_median_income + ocean_proximity_encoded + average_bed_rooms, data=housing.training, family="gaussian", control.compute = list(cpo = TRUE, dic = TRUE, waic = TRUE, config = TRUE))
+summary(housing.I.Q1.custom_priors)
+```
+
+**Explanation:** Even after changing the priors, the DIC, WIAC Score and Marginal Log-likelihood values are same for the above defined Model 1. Hence, the results are not that sensitive to priors.
+
+# Q2)[10 marks] Update your model in Q1 to also include an rw1 random effect model for the housing_median_age, and an ar1 random effect model for log(median_income).
+
+**Print out the model summary and interpret the posterior means of the regression coefficients.**
+ 
+```{r Model 2}
+housing.I.Q2 <- inla(log_median_house_value ~ longitude + latitude + f(housing_median_age, model = "rw1") + f(log_median_income, model = "ar1") + ocean_proximity_encoded + average_bed_rooms, data=housing.training, family="gaussian", control.compute = list(cpo = TRUE, dic = TRUE, waic = TRUE, config = TRUE))
+summary(housing.I.Q2)
+```
+
+Here, from the above table, we have the mean precision values for housing_median_age (134.79) and log_median_income (10.30). The mean precision value for housing_median_age of 134.79 indicates a strong temporal smoothing, indicating that the adjacent values for housing_median_values are highly similar. Also, the mean precision value for log(median_income) (10.30) indicates a low smoothing, suggesting a high variability in the adjacent values of log(median_income).
+
+```{r Model 2 - Longitude and Latitude mean coefficient values}
+cat("Longitude Mean: ", housing.I.Q2$summary.fixed["longitude", "mean"], "\n")
+cat("Latitude Mean: ", housing.I.Q2$summary.fixed["latitude", "mean"], "\n")
+```
+The coefficients of Longitude and Latitude mean are both negative, with not much change from Model 1. Significance is the same as Model 1.
+
+```{r Model 2 - Numeric covariates mean coefficient values}
+cat("Average Bed Rooms Mean: ", housing.I.Q2$summary.fixed["average_bed_rooms", "mean"], "\n")
+```
+Here, the average_bed_rooms mean coefficient value doesn't show a high correlation with the predictor log(median_house_value), indicating a very low dependence on average_bed_rooms.
+
+***Plot the posterior means of the random effects for housing_median_age and log(median_income). The x-axis should be the covariate value (such as housing_median_age), and the y-axis should be the posterior mean of the random effect.***
+
+```{r Model 2 - housing_median_age vs Posterior means (housing_median_age)}
+plot(unique(housing.training$housing_median_age), housing.I.Q2$summary.random$housing_median_age$mean,type="l",xlab="housing_median_age",ylab="Posterior Means (housing_median_age)")
+```
+
+```{r Model 2 - log(median_income) vs Posterior Means (log(median_income))}
+plot(unique(housing.training$log_median_income), housing.I.Q2$summary.random$log_median_income$mean,type="l",xlab="log_median_income",ylab="Posterior Means (log_median_income)")
+```
+
+**Compute the DIC, NLSCPO and WAIC scores.**
+
+```{r Model 2 - DIC score}
+cat("Model 2 - DIC Score: ", housing.I.Q2$dic$dic, '\n')
+```
+
+```{r Model 2 - NLSCPO score}
+cpo_list_2 <- housing.I.Q2$cpo$cpo
+cat("Model 2 - NLSCPO Score: ", -sum(log(cpo_list_2[!is.na(cpo_list_2)])), '\n')
+```
+
+```{r Model 2 - WAIC score}
+cat("Model 2 - WAIC Score: ", housing.I.Q2$waic$waic)
+```
+
+**Check the sensitivity of your results to changing the priors.**
+
+```{r Model 2 - Custom priors and modelling}
+# custom priors for model 2
+prec.prior <- list(prec=list(prior = "loggamma", param = c(0.1, 0.1)))
+prior.beta <- list(mean.intercept = 0, prec.intercept = 0.01, mean = 0, prec = 0.01)
+
+housing.I.Q2.custom_prior <- inla(log_median_house_value ~ longitude + latitude + f(housing_median_age, model = "rw1") + f(log_median_income, model = "ar1") + ocean_proximity_encoded + average_bed_rooms, data=housing.training, family="gaussian", control.compute = list(cpo = TRUE, dic = TRUE, waic = TRUE, config = TRUE))
+summary(housing.I.Q2.custom_prior)
+```
+
+**Explanation:** Even Model 2 is not much sensitive to changing the priors, since there is a minor difference between the DIC, WAIC scores and Marginal log-likelihood.
+
+# Q3)[10 marks]
+
+**In this question, we will use a spatial random effects model for the location.**
+
+**Create a Bayesian regression model in INLA or inlabru with Gaussian likelihood using the housing.training dataset with log(median_house_value) as the response variable, and the fixed effects in the model are as follows:**
+
+**longitude, latitude,**
+
+**housing_median_age,**
+$(housing\_median\_age)^2$**,**$(housing\_median\_age)^3$,$(housing\_median\_age)^4$
+
+**log(median_income),** $(\log(median\_income))^2$**,**
+$(\log(median\_income))^3$, $(\log(median\_income))^4$ **,**
+
+**housing_median_age\*log(median_income),**
+
+**ocean_proximity, average_bed_rooms.**
+
+**Use scaled versions of the non-categorical covariates in your model.**
+
+**Include a spatial (spde2) random effect for the location (longitude, latitude), with Matern covariance. [Hint: You must create a mesh first; see the code for Lecture 7 and the solutions of Workshop 5.]**
+
+**Print out the model summary and interpret the posterior means of the regression coefficients.**
+
+```{r Mesh creation for Model 3}
+coords <- as.matrix(housing.training[, 1:2]) 
+prdomain <- inla.nonconvex.hull(as.matrix(housing.training[, 1:2]), convex = -0.03, concave = -0.05, resolution = c(100, 100))
+prmesh <- inla.mesh.2d(boundary = prdomain, max.edge = c(0.45, 1), cutoff = 0.2)
+```
+
+```{r Mesh plot}
+plot(coords)
+plot(prdomain)
+plot(prmesh)
+```
+
+```{r Model 3}
+library(inlabru)
+
+Locations = data.frame(easting=housing.training$longitude, northing=housing.training$latitude) 
+loc.spde = inla.spde2.pcmatern(mesh = prmesh,
+           prior.range = c(1, 0.5), 
+           prior.sigma = c(200, 0.1)) 
+
+housing.training$geometry <- sf::st_as_sf(Locations, coords = c("easting", "northing"))$geometry
+
+cmp <- log_median_house_value ~ floc(geometry, model = loc.spde) + longitude + latitude + housing_median_age + housing_median_age^2 + housing_median_age^3 + housing_median_age^4 + log_median_income  + log_median_income^2 + log_median_income^3 + log_median_income^4 + interaction_term + ocean_proximity_encoded + average_bed_rooms
+
+bru_options_set(control.compute = list(cpo = TRUE))
+
+housing.I.Q3 <- bru(components=cmp, family = "gaussian", data=housing.training, samplers = prdomain, domain = list(coordinates = prmesh), options=list(control.inla=list(tolerance=1e-10)))
+summary(housing.I.Q3)
+```
+From the model 3 summary, it can be seen that only latitude and log(median_income) covariates have a significant correlation with the predictor log(median_house_value), with one unit increase in the latitude reducing the predictor log(median_house_value) and one unit increase in log(median_income) increasing the predictor log(median_house_value).
+
+**Plot the posterior mean of the spatial random effect in terms of the location.**
+
+```{r Model 3 - Plot of posterior mean of location (longitude vs latitude) for spatial random effects}
+posterior_means <- housing.I.Q3$summary.fixed[, "mean"]
+
+library(ggplot2)
+library(sp)
+library(RColorBrewer)
+
+pix <- fm_pixels(prmesh, dims =c(200, 200))
+pred <- predict(housing.I.Q3, pix, ~floc)
+ggplot() + gg(pred, geom = "tile") + ggtitle("Spatial Random Effect (Posterior Mean)") + scale_fill_gradientn(colours=brewer.pal(11, "RdYlBu"), limits=range(pred$mean)) + labs(x = "Longitude(Scaled)", y = "Latitude(Scaled)")
+```
+
+**Compute the DIC, NLSCPO and WAIC scores.**
+
+```{r Model 3 - DIC score}
+cat("Model 3 - DIC Score: ",housing.I.Q3$dic$dic, '\n')
+```
+
+```{r Model 3 - NLSCPO score}
+cpo_list_3 <- housing.I.Q3$cpo$cpo
+cat("Model 3 - NLSCPO Score: ", -sum(log(cpo_list_3[!is.na(cpo_list_3)])), '\n')
+```
+
+```{r Model 3 - WAIC score}
+cat("Model 3 - WAIC Score: ", housing.I.Q3$waic$waic, '\n')
+```
+
+**Compare the models in Q1) - Q3) in terms of DIC, NLSCPO and WAIC scores.**
+
+From results of Question 1, 2 and 3:
+
+DIC Scores for Model 1, 2 and 3 respectively - 7615.771, 7020.642, 3964.085 
+NLSCPO Scores for Model 1, 2 and 3 respectively - 3829.462, 3522.434, 1990.404
+WAIC Scores for Model 1, 2 and 3 respectively - 7674.126, 7052.643, 3968.408
+
+From the above data, it can be said that each iteration of the modelling process shows improvement in the model performance due to decreasing DIC, NLSCPO and WAIC scores.
+
+**Check the sensitivity of your results to changing the priors and using a finer mesh.**
+
+```{r Model 3 - Custom priors, finer mesh and modelling}
+
+# finer mesh through modifying max edge parameter
+coords <- as.matrix(housing.training[, 1:2]) 
+prdomain <- inla.nonconvex.hull(as.matrix(housing.training[, 1:2]), convex = -0.03, concave = -0.05, resolution = c(100, 100))
+prmesh.finer <- inla.mesh.2d(boundary = prdomain, max.edge = c(0.3, 0.4), cutoff = 0.2)
+
+library(inlabru)
+
+# custom prios through change in loc.spde priors range and sigma
+Locations = data.frame(easting=housing.training$longitude, northing=housing.training$latitude) 
+loc.spde = inla.spde2.pcmatern(mesh = prmesh.finer,
+           prior.range = c(10, 0.5), 
+           prior.sigma = c(2000, 0.1)) 
+
+housing.training$geometry <- sf::st_as_sf(Locations, coords = c("easting", "northing"))$geometry
+
+cmp.finer <- log_median_house_value ~ floc(geometry, model = loc.spde) + longitude + latitude + housing_median_age + housing_median_age^2 + housing_median_age^3 + housing_median_age^4 + log_median_income  + log_median_income^2 + log_median_income^3 + log_median_income^4 + interaction_term + ocean_proximity_encoded + average_bed_rooms
+
+bru_options_set(control.compute = list(cpo = TRUE))
+
+housing.I.Q3.custom_priors <- bru(components=cmp.finer, family = "gaussian", data=housing.training, samplers = prdomain, domain = list(coordinates = prmesh.finer), options=list(control.inla=list(tolerance=1e-10)))
+
+summary(housing.I.Q3.custom_priors)
+```
+
+**Explanation:** Model 3 is also not very sensitive to change in priors or higher resolution of the mesh. The DIC, WAIC scores are almost similar with equivalent marginal log likelihood values.
+
+# Q4)[10 marks]
+
+**In this question, we will evaluate the predictive performance of these models.**
+
+**Do the following two tests for all 3 models.**
+
+**First, compute the posterior mean of the log(median_house_value) for the districts in the training dataset housing.training. Compute the median absolute difference between the posterior means of the log(median_house_value) and its true values on the training dataset. This can be done by including the posterior means in an array** $v$ **, the true values in an array** $t$**, and computing** $\text{median}(|v-t|)$.
+
+**Second, evaluate the log(median_house_value) 's posterior predictive means on the test dataset housing.test. Compute the median absolute difference between the log(median_house_value) 's posterior predictive mean and its true value on the test dataset.**
+
+**Discuss the results.**
+
+## Model 1
+
+```{r True training and test values for log(median_house_values)}
+training.true <- exp(log_median_house_value.training.true)
+test.true <- exp(log_median_house_value.test.true)
+```
+
+### Test 1: Posterior mean of the log(median_house_value) for the districts in the training dataset housing.training
+
+```{r Model 1 - Test 1}
+Q1.test1.posterior_means <- exp(housing.I.Q1$summary.fitted.values$mean)
+Q1.test1.abs_diff <- abs(Q1.test1.posterior_means - training.true)
+
+cat("Model 1 - Test 1 - Posterior mean of the log(median_house_value): ", median(Q1.test1.abs_diff), "\n")
+```
+
+### Test 2: Evaluate the log(median_house_value)’s posterior predictive means on the test dataset housing.test
+
+```{r}
+housing.I.Q1.test_model <- inla(log_median_house_value ~ longitude + latitude + housing_median_age + log_median_income + ocean_proximity_encoded + average_bed_rooms, data=housing.masked, family="gaussian", control.compute = list(cpo = TRUE, dic = TRUE, waic = TRUE))
+```
+
+```{r Model 1 - Test 2}
+Q1.test.predicted <- exp(housing.I.Q1.test_model$summary.fitted.values$mean)[(nrow(housing.training)+1): nrow(housing.masked)]
+
+cat("Model 1 - Test 2 - log(median_house_value)’s posterior predictive means (test): ",median(abs(Q1.test.predicted - exp(log_median_house_value.test.true))), "\n")
+```
+
+## Model 2
+
+### Test 1: Posterior mean of the log(median_house_value) for the districts in the training dataset housing.training
+
+```{r Model 2 - Test 1}
+Q2.test1.posterior_means <- exp(housing.I.Q2$summary.fitted.values$mean)
+Q2.test1.abs_diff <- abs(Q2.test1.posterior_means - training.true)
+
+cat("Model 2 - Test 1 - Posterior mean of the log(median_house_value): ", median(Q2.test1.abs_diff), "\n")
+```
+
+### Test 2: Evaluate the log(median_house_value)’s posterior predictive means on the test dataset housing.test
+
+```{r}
+housing.I.Q2.test_model <- inla(log_median_house_value ~ longitude + latitude + f(housing_median_age, model = "rw1") + f(log_median_income, model = "ar1") + ocean_proximity_encoded + average_bed_rooms, data=housing.masked, family="gaussian", control.compute = list(cpo = TRUE, dic = TRUE, waic = TRUE))
+```
+
+```{r Model 2 - Test 2}
+Q2.test.predicted <- exp(housing.I.Q2.test_model$summary.fitted.values$mean)[(nrow(housing.training)+1): nrow(housing.masked)]
+
+cat("Model 2 - Test 2 - log(median_house_value)’s posterior predictive means (test): ", median(abs(Q2.test.predicted - exp(log_median_house_value.test.true))), "\n")
+```
+
+## Model 3
+
+### Test 1: Posterior mean of the log(median_house_value) for the districts in the training dataset housing.training
+
+```{r Model 3 - Test 1}
+Q3.test1.posterior_means <- exp(housing.I.Q3$summary.fitted.values$mean)
+Q3.test1.abs_diff <- abs(Q3.test1.posterior_means - training.true)
+cat("\n", "Model 3 - Test 1 - Posterior mean of the log(median_house_value): ", median(Q3.test1.abs_diff), "\n")
+```
+
+### Test 2: Evaluate the log(median_house_value)’s posterior predictive means on the test dataset housing.test
+
+```{r}
+library(inlabru)
+
+coords <- as.matrix(housing.masked[, 1:2]) 
+prdomain <- inla.nonconvex.hull(as.matrix(housing.masked[, 1:2]), convex = -0.03, concave = -0.05, resolution = c(100, 100))
+prmesh <- inla.mesh.2d(boundary = prdomain, max.edge = c(0.45, 1), cutoff = 0.2)
+
+Locations = data.frame(easting=housing.masked$longitude, northing=housing.masked$latitude) 
+loc.spde = inla.spde2.pcmatern(mesh = prmesh,
+           prior.range = c(1, 0.5), 
+           prior.sigma = c(200, 0.1)) 
+
+housing.masked$geometry <- sf::st_as_sf(Locations, coords = c("easting", "northing"))$geometry
+
+cmp <- log_median_house_value ~ floc(geometry, model = loc.spde) + longitude + latitude + housing_median_age + housing_median_age^2 + housing_median_age^3 + housing_median_age^4 + log_median_income  + log_median_income^2 + log_median_income^3 + log_median_income^4 + interaction_term + ocean_proximity_encoded + average_bed_rooms
+
+
+housing.I.Q3.test_model <- bru(components=cmp, family = "gaussian",data=housing.masked,
+                    samplers = prdomain,
+    domain = list(coordinates = prmesh),
+                 options=list(control.inla=list(tolerance=1e-10)))
+```
+
+```{r Model 3 - Test 2}
+Q3.test.predicted <- exp(housing.I.Q3.test_model$summary.fitted.values$mean)[(nrow(housing.training)+1): nrow(housing.masked)]
+
+cat("Model 3 - Test 2 - log(median_house_value)’s posterior predictive means (test): ", median(abs(Q3.test.predicted - exp(log_median_house_value.test.true))), "\n")
+```
+
+**Explanation:** If we compare the results of both tests for each of Models 1,2 and 3, it can be seen that the difference between both the Posterior Mean of log(median_house_value) and posterior predictive means is decreasing for each iteration of modelling process.
+
+Hence, it indicates better model fit vs complexity and hence better performance.
+
+# Q5)[10 marks] Perform posterior predictive checks (using replicates) on all 3 models Q1-Q3 fitted on the housing.training dataset. Choose your test functions to provide insight into the model. Discuss the results.
+
+## Model 1
+
+```{r Model 1 - Posterior predictive checks}
+no_of_samples <- 100
+Q1.samples <- inla.posterior.sample(n = no_of_samples, result = housing.I.Q1)
+Q1.predictor.samples=inla.posterior.sample.eval(function(...) {Predictor},
+Q1.samples)
+Q1.sigma.samples=1/sqrt(inla.posterior.sample.eval(function(...) {theta},
+Q1.samples))
+
+yrep <- c()
+
+for(i in 1:nrow(housing.training)){
+  yrep <- c(yrep, Q1.predictor.samples[i,] + rnorm(n = no_of_samples, mean = 0, sd = Q1.sigma.samples))
+}
+
+yrep <- matrix(yrep, nrow = nrow(housing.training), ncol = no_of_samples)
+```
+
+```{r Model 1 - tests}
+yrepmin=apply(yrep,2,min)
+yrepmax=apply(yrep,2,max)
+yrepmedian=apply(yrep,2,median)
+require(fBasics)
+yrepskewness=apply(yrep,2,skewness)
+```
+
+```{r Model 1 - Test plots}
+y <- housing.training$log_median_house_value
+
+#Predictive checks using replicated data - minimum
+hist(yrepmin,col="gray40")
+abline(v=min(y),col="red",lwd=2)
+
+#Predictive checks using replicated data - minimum
+hist(yrepmax,col="gray40")
+abline(v=max(y),col="red",lwd=2)
+
+#Predictive checks using replicated data - minimum
+hist(yrepmedian,col="gray40")
+abline(v=median(y),col="red",lwd=2)
+
+#Predictive checks using replicated data - minimum
+hist(yrepskewness,col="gray40")
+abline(v=skewness(y),col="red",lwd=2)
+```
+
+For Model 1, all the true values for the tests min, max, median and skewness lie in the range of observed values. Hence, model 1 is capable of replicating the key features of observed data like min, max (minimum and maximum values present in the dataset), median (central tendency of the data) and skewness (distribution of the data).
+
+## Model 2
+
+```{r Model 2 - Posterior predictive checks}
+no_of_samples <- 100
+Q2.samples <- inla.posterior.sample(n = no_of_samples, result = housing.I.Q2)
+Q2.predictor.samples=inla.posterior.sample.eval(function(...) {Predictor},
+Q2.samples)
+Q2.sigma.samples=1/sqrt(inla.posterior.sample.eval(function(...) {theta},
+Q2.samples))
+
+yrep <- c()
+
+for(i in 1:nrow(housing.training)){
+  yrep <- c(yrep, Q2.predictor.samples[i,] + rnorm(n = no_of_samples, mean = 0, sd = Q2.sigma.samples))
+}
+
+yrep <- matrix(yrep, nrow = nrow(housing.training), ncol = no_of_samples)
+```
+
+```{r Model 2 - Tests}
+yrepmin=apply(yrep,2,min)
+yrepmax=apply(yrep,2,max)
+yrepmedian=apply(yrep,2,median)
+require(fBasics)
+yrepskewness=apply(yrep,2,skewness)
+```
+
+```{r Model 2 - Test plots}
+y <- housing.training$log_median_house_value
+
+#Predictive checks using replicated data - minimum
+hist(yrepmin,col="gray40")
+abline(v=min(y),col="red",lwd=2)
+
+#Predictive checks using replicated data - minimum
+hist(yrepmax,col="gray40")
+abline(v=max(y),col="red",lwd=2)
+
+#Predictive checks using replicated data - minimum
+hist(yrepmedian,col="gray40")
+abline(v=median(y),col="red",lwd=2)
+
+#Predictive checks using replicated data - minimum
+hist(yrepskewness,col="gray40")
+abline(v=skewness(y),col="red",lwd=2)
+```
+
+For Model 2, only the true values for the tests median and skewness lie in the range of observed values. It means that the model 2 only captures the median (central tendency of the data) and skewness (distribution of the data), but not the range of min-max values of the dataset.
+
+## Model 3
+
+```{r Model 3 - Posterior Predictive Checks}
+no_of_samples <- 100
+Q3.samples <- inla.posterior.sample(n = no_of_samples, result = housing.I.Q3)
+Q3.predictor.samples=inla.posterior.sample.eval(function(...) {APredictor},
+Q3.samples)
+Q3.sigma.samples=1/sqrt(inla.posterior.sample.eval(function(...) {theta},
+Q3.samples))
+
+yrep <- c()
+
+for(i in 1:nrow(housing.training)){
+  yrep <- c(yrep, unlist(Q3.predictor.samples[i,]) + rnorm(n = no_of_samples, mean = 0, sd = Q3.sigma.samples))
+}
+
+yrep <- matrix(yrep, nrow = nrow(housing.training), ncol = no_of_samples)
+```
+
+```{r Model 3 - Tests}
+yrepmin=apply(yrep,2,min)
+yrepmax=apply(yrep,2,max)
+yrepmedian=apply(yrep,2,median)
+require(fBasics)
+yrepskewness=apply(yrep,2,skewness)
+```
+
+```{r Model 3 - Test plots}
+y <- housing.training$log_median_house_value
+
+#Predictive checks using replicated data - minimum
+hist(yrepmin,col="gray40")
+abline(v=min(y),col="red",lwd=2)
+
+#Predictive checks using replicated data - minimum
+hist(yrepmax,col="gray40")
+abline(v=max(y),col="red",lwd=2)
+
+#Predictive checks using replicated data - minimum
+hist(yrepmedian,col="gray40")
+abline(v=median(y),col="red",lwd=2)
+
+#Predictive checks using replicated data - minimum
+hist(yrepskewness,col="gray40")
+abline(v=skewness(y),col="red",lwd=2)
+```
+For Model 3, only the true values for the tests median lie in the range of observed values. It means that the model 3 only captures the median (central tendency of the data), but not the range of min-max values of the dataset.
